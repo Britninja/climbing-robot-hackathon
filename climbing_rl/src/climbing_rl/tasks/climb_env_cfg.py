@@ -47,8 +47,14 @@ LEFT_FOOT = LIMBS.index("left_foot")  # 2
 OTHERS_THAN_LEFT_FOOT = tuple(i for i in range(4) if i != LEFT_FOOT)
 
 
-def _base_cfg(play: bool, collisions: str = "light", max_row: int = 32) -> ManagerBasedRlEnvCfg:
-  """Ce qui est commun à toutes les tâches : scène, actions, observations, événements, simulation."""
+def _base_cfg(
+  play: bool, collisions: str = "light", max_row: int = 32, mesh_holds: tuple[Hold, ...] = (),
+) -> ManagerBasedRlEnvCfg:
+  """Ce qui est commun à toutes les tâches : scène, actions, observations, événements, simulation.
+
+  mesh_holds : en mode "light", les prises qui reçoivent leurs maillages de collision (celles que le membre en
+    mouvement peut toucher). En mode "full", toutes les prises les ont.
+  """
   wall = Wall.load(WALL)
   start_sockets = [s.tolist() for s in wall.start_sockets()]
   robot = SceneEntityCfg("robot", joint_names=(ACTUATED,))
@@ -58,7 +64,9 @@ def _base_cfg(play: bool, collisions: str = "light", max_row: int = 32) -> Manag
     terrain=None,  # pas de terrain mjlab : toutes les origines à 0, le mur est au même endroit dans chaque monde
     num_envs=1,
     entities={"robot": climber_cfg(WALL, collisions=collisions, timestep=TIMESTEP)},
-    spec_fn=wall_spec_fn(WALL, max_row=max_row, hold_meshes=(collisions == "full")),
+    spec_fn=wall_spec_fn(
+      WALL, max_row=max_row, hold_meshes=collisions == "full" or [(h.col, h.row) for h in mesh_holds],
+    ),
   )
 
   # ---------------------------------------------------------------- actions : 18 positions cibles (pas la tête)
@@ -169,13 +177,15 @@ def hang_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
 # ==================================================================================================== LeftFoot
 def left_foot_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
   """Monter le pied gauche d'une prise (5 rangées = 7,5 cm), les 3 autres membres restant accrochés."""
-  cfg = _base_cfg(play)
   wall = Wall.load(WALL)
   start = wall.start_sockets()
   foot = wall.start["left_foot"]
   target_hold = Hold(foot.col-3, foot.row + 5)
   if target_hold not in wall.holds:
     raise ValueError(f"pas de prise {target_hold} sur le mur {WALL}")
+  # maillages sur les prises des deux rangées du pied (départ et cible) : il ne doit traverser aucune d'elles.
+  # Coût : -19 % de pas par seconde, le même avec 4 ou 8 prises maillées (c'est d'avoir des maillages qui coûte).
+  cfg = _base_cfg(play, mesh_holds=tuple(h for h in wall.holds if h.row in (foot.row, target_hold.row)))
   goal = start.copy()
   goal[LEFT_FOOT] = target_hold.socket  # cibles : 3 coupes de départ + la nouvelle coupe du pied gauche
   goal = [g.tolist() for g in goal]

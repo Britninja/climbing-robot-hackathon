@@ -6,7 +6,7 @@ robot et eux. Chaque environnement mjlab est un monde séparé : le mur est au m
 
 from __future__ import annotations
 
-from typing import Callable
+from typing import Callable, Collection
 
 import mujoco
 
@@ -24,7 +24,7 @@ from climbing_rl.wall import (
 def wall_spec_fn(
   wall_name: str = "N1",
   max_row: int = 32,
-  hold_meshes: bool = False,
+  hold_meshes: bool | Collection[tuple[int, int]] = False,
   hold_friction: float = 0.5,
   floor_friction: float = 1.0,
 ) -> Callable[[mujoco.MjSpec], None]:
@@ -33,13 +33,16 @@ def wall_spec_fn(
   max_row : on ne crée que les prises jusqu'à cette rangée (les rangées sont espacées de 5 trous, soit 7,5 cm, sur
     N1 ; départ : pieds rangée 2, mains rangée 22). Chaque prise ajoute ~30 géométries : en simuler 70 pour rien
     ralentit tout.
-  hold_meshes : ajoute aussi les 14 maillages convexes de chaque prise (plaque, goussets, peau sous la coupe qui
-    empêche d'entrer par-dessous). Plus fidèle, plus lent. Sans eux, la coupe est faite de sphères seulement.
+  hold_meshes : ajoute aussi les 14 maillages convexes de la prise (plaque, goussets, peau sous la coupe qui
+    empêche d'entrer par-dessous), sinon la tige de la boule les traverse. Plus fidèle, plus lent. True : toutes les
+    prises ; une liste de (col, row) : seulement celles-là (les prises que le robot peut toucher pendant la tâche).
+    Sans eux, la coupe est faite de sphères seulement.
   """
   wall = Wall.load(wall_name)
   holds = wall.holds_up_to_row(max_row)
   spheres = hold_spheres()
   meshes = hold_mesh_files() if hold_meshes else []
+  mesh_holds = None if hold_meshes is True else set(hold_meshes or ())  # None : toutes
   visual = HOLD_DIR / "hold_visual.stl"
 
   def add_wall(spec: mujoco.MjSpec) -> None:
@@ -77,7 +80,7 @@ def wall_spec_fn(
           type=mujoco.mjtGeom.mjGEOM_SPHERE, size=[sp["r"], 0, 0], pos=sp["pos"], group=3,
           rgba=[1.0, 0.5, 0.0, 1], friction=hold_fric, condim=3,
         )
-      for f in meshes:
+      for f in meshes if mesh_holds is None or (h.col, h.row) in mesh_holds else []:
         b.add_geom(
           type=mujoco.mjtGeom.mjGEOM_MESH, meshname="hold_" + f.stem, group=3,
           rgba=[0.25, 0.55, 0.95, 1], friction=hold_fric, condim=3,

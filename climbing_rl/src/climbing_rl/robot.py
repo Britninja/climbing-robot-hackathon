@@ -22,6 +22,30 @@ BALL_GEOMS = tuple(f"{limb}_ball_coll" for limb in LIMBS)
 #: Expression régulière des articulations commandées par la politique : toutes sauf la tête
 ACTUATED = r"^(?!head$).*"
 
+#: Boîtes de collision du mode "light" (repère du corps, mm : centre, demi-tailles), mesurées sur les morceaux
+#: convexes `coll_foot__configuration_right_*` et `coll_radius_*` du modèle. Sans elles, le pied et la tige de la
+#: boule traversent le mur et les prises (seules les boules touchent).
+_FOOT_BOXES = (
+  ((0.0, -16.45, 42.0), (23.1, 7.15, 45.6)),  # semelle + goussets (morceaux 17, 20, 23)
+  ((0.0, 0.15, 57.25), (22.8, 9.45, 4.05)),  # traverse (18)
+  ((0.0, -4.15, -1.15), (10.3, 13.75, 2.45)),  # talon, côté cheville (19)
+  ((0.0, 1.4, 77.2), (6.7, 10.7, 15.9)),  # tige vers la boule (22)
+  ((0.0, 12.45, 101.15), (6.7, 9.05, 17.55)),  # crochet au-dessus de la boule (00 à 16, 21)
+)
+_RIGHT_FOREARM_BOXES = (
+  ((0.0, -47.95, 12.1), (9.4, 35.65, 11.6)),  # corps de l'avant-bras (20)
+  ((0.0, -26.4, 27.1), (9.5, 34.9, 3.4)),  # flanc côté servo (19)
+  ((0.0, -17.45, -1.5), (9.5, 26.95, 2.0)),  # flanc opposé (21)
+  ((14.1, -77.9, 13.5), (6.1, 5.5, 6.1)),  # tige de la boule (00 à 18)
+)
+#: L'avant-bras gauche (`radius_mirrored`) est le droit retourné : (x, y, z) -> (-x, -y, -z)
+LIGHT_BOXES = {
+  "foot_climb": _FOOT_BOXES,
+  "foot_climb_2": _FOOT_BOXES,
+  "radius_right": _RIGHT_FOREARM_BOXES,
+  "radius_left": tuple((tuple(-c for c in pos), half) for pos, half in _RIGHT_FOREARM_BOXES),
+}
+
 
 # --------------------------------------------------------------------------------------------------------------
 # Modèle
@@ -30,9 +54,9 @@ def climber_spec(collisions: str = "light") -> mujoco.MjSpec:
   """Le MJCF du robot grimpeur (`microban_model/mjcf/robot_climb.xml`).
 
   collisions :
-    "light" (par défaut, pour l'entraînement) : seules les 4 boules et les 7 boîtes des servos touchent le mur et les
-      prises. Les 269 maillages convexes du corps sont désactivés : en milliers d'exemplaires sur GPU, ils coûtent
-      très cher, et ce sont les boules qui grimpent.
+    "light" (par défaut, pour l'entraînement) : seules les 4 boules, les 7 boîtes des servos et les boîtes des pieds
+      et avant-bras (LIGHT_BOXES) touchent le mur et les prises. Les 269 maillages convexes du corps sont
+      désactivés : en milliers d'exemplaires sur GPU, ils coûtent très cher, et ce sont les boules qui grimpent.
     "full" : toutes les collisions du modèle (comme le simulateur officiel), pour vérifier une politique.
   """
   spec = mujoco.MjSpec.from_file(str(microban_model.mjcf(climb=True)))
@@ -41,6 +65,14 @@ def climber_spec(collisions: str = "light") -> mujoco.MjSpec:
       if g.type == mujoco.mjtGeom.mjGEOM_MESH and (g.contype or g.conaffinity):
         g.contype = 0
         g.conaffinity = 0
+    for body_name, boxes in LIGHT_BOXES.items():
+      body = spec.body(body_name)
+      for k, (pos, half) in enumerate(boxes):
+        # contype 1 / conaffinity 0 : touche le monde (mur, prises, sol), pas le reste du robot
+        body.add_geom(
+          name=f"{body_name}_box{k}", type=mujoco.mjtGeom.mjGEOM_BOX, pos=[p / 1000 for p in pos],
+          size=[h / 1000 for h in half], contype=1, conaffinity=0, group=3, density=0.0, rgba=[1.0, 0.2, 0.6, 0.5],
+        )
   elif collisions != "full":
     raise ValueError("collisions : 'light' ou 'full'")
   return spec
