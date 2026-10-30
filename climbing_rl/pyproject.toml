@@ -1,0 +1,34 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "climbing-rl"
+version = "0.1.0"
+description = "Tâches mjlab (RL sur GPU) pour le Microban grimpeur sur le mur du hackathon Rock Climbing Robots"
+readme = "README.md"
+# BAM n'accepte que Python 3.12
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  # Servos XL330 simulés sur GPU + mjlab 1.3 et la pile MuJoCo/Warp compatible (épinglée par BAM)
+  "better-actuator-models[mjlab]",
+  # Le modèle MJCF du robot grimpeur (mains en boule), le même que le simulateur officiel
+  "microban-model",
+  "wandb==0.22.3",
+]
+
+# Les tâches de ce paquet apparaissent dans `uv run train` / `uv run play`
+[project.entry-points."mjlab.tasks"]
+climbing_rl = "climbing_rl.tasks"
+
+[project.scripts]
+check-scene = "climbing_rl.check_scene:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/climbing_rl"]
+
+[tool.uv.sources]
+# Même commit de BAM que microban_sim (le simulateur officiel), en HTTPS (pas de clé SSH nécessaire)
+better-actuator-models = { git = "https://github.com/Rhoban/bam", rev = "e9a619d56da5236206f4de6ceec2c1ee1b497b5c" }
+# Les maillages sont dans Git LFS
+microban-model = { git = "https://github.com/Rhoban/microban_model", lfs = true }
