@@ -26,11 +26,13 @@ import pyrealsense2 as rs
 from ultralytics import YOLO
 
 BASE = Path(__file__).resolve().parent
+
 sys.path.insert(0, str(BASE.parent))
+sys.path.insert(0, str(BASE.parent.parent))
 import perception_rgb as P
 
 try:
-    import wall_detector as mur
+    import simulator.perception_rl.wall_detector as mur
 except ModuleNotFoundError as exc:
     if exc.name != "wall_detector":
         raise
@@ -59,9 +61,7 @@ def trouver_poids(chemin):
         return p
 
     candidats = [
-        BASE.parent / "runs/detect/runs/detect/prises_small_v2/weights/best.pt",
-        BASE / "runs/detect/runs/detect/prises_small_v2/weights/best.pt",
-        BASE.parent / "runs/detect/prises_small_v2/weights/best.pt",
+        BASE.parent.parent / "runs/detect/runs/detect/prises_small_v2/weights/best.pt",
     ]
     for p in candidats:
         if p.is_file():
