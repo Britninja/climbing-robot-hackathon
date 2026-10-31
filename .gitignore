@@ -10,3 +10,10 @@ placo_test.py
 move_options.json
 robot_variant.txt
 recordings/
+
+*.png
+*.jpg
+*.json
+*.Identifier
+*.pyc
+*.avi
