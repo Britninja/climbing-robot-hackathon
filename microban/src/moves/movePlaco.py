@@ -1,205 +1,236 @@
 import math
+from pathlib import Path
+
 import numpy as np
 import placo
 import microban_model
 from microban_model import JOINTS
 
-FRAMES = ("right_foot_ball", "left_foot_ball", "right_hand_ball", "left_hand_ball")
-FEET = ("right_foot_ball", "left_foot_ball")
 
-# ======================= RÉGLAGES (à ajuster dans le simulateur) =======================
+def find_urdf():
+    """robot_climb.urdf à côté de ce fichier, sinon dans cad/, sinon l'URDF climb de microban_model."""
+    for path in (Path(__file__).with_name("robot_climb.urdf"), Path("cad/robot_climb.urdf")):
+        if path.is_file():
+            return str(path)
+    return str(microban_model.urdf(climb=True))
 
-# Trajectoire d'un membre (m) : se lève de LIFT, recule de BACK, monte jusqu'à OVER au-dessus
-# de la prise, avance en appuyant de PRESS vers le mur, puis se pose sur la prise.
-LIFT = 0.035
-BACK = 0.05
-OVER = {"hand": 0.05, "foot": 0.03}    # hauteur de passage au-dessus de la prise
-PRESS = {"hand": 0.04, "foot": 0.015}  # appui vers le mur à l'approche (viser un peu dans le
-                                       # mur crée une force qui accroche la boule à la prise)
+LIMB_FRAMES = {                     # membre -> repère URDF qui touche le mur
+    "left_hand": "left_hand_ball",
+    "right_hand": "right_hand_ball",
+    "left_foot": "left_foot_ball",
+    "right_foot": "right_foot_ball",
+}
+Z_SPACING = 0.075                   # distance entre deux barreaux (m)
 
-# Posture de repos : angle visé (rad), le même à gauche et à droite.
-# Hanches très fléchies et genoux tendus (le bassin recule, les genoux restent loin des prises),
-# chevilles relevées, bras levés et coudes pliés (le corps reste près du mur).
-# Les articulations non listées gardent leur angle de la pose de départ.
-REST_POSTURE = {
-    "hip_pitch": -1.57,       # hanches fléchies au maximum
-    "knee": 0.01,             # genoux tendus
-    "ankle_pitch": 0.55,      # chevilles relevées
-    "shoulder_pitch": -2.0,   # bras levés
-    "elbow": 2.0,             # coudes pliés
+# Position de départ des 4 boules dans le repère Placo (x = vers le mur, y = gauche, z = haut)
+START_POS = {
+    "left_hand": np.array([0.08417194, 0.08258263, 0.16097954]),
+    "right_hand": np.array([0.08419343, -0.08261053, 0.16094472]),
+    "left_foot": np.array([0.09276341, 0.03737545, -0.14360264]),
+    "right_foot": np.array([0.09277957, -0.03763053, -0.14360031]),
 }
 
-# Pieds à plat sur le mur, presque parallèles
-TOE_IN_DEG = 5.0          # pointes vers l'intérieur (0 = parallèles, signe opposé si ça tourne à l'envers)
+# Décalage ajouté au point "juste avant de se poser" (réglé à la main en simulation)
+COMPENSATION = {
+    "left_foot": [0.015, 0.01, 0.025],
+    "right_foot": [0.015, -0.005, 0.005],
+    "left_hand": [0.04, -0.02, 0.05],
+    "right_hand": [0.12, 0.02, 0.05],
+}
 
-# =======================================================================================
+TOE_IN_DEG = 10.0          # de combien les pointes de pied tournent vers l'intérieur
+TOE_IN_SIGN = -1.0         # inverser si les pieds tournent du mauvais côté
+FOOT_REST_WEIGHT = 1e-3    # garde aussi l'angle du pied en appui (0.0 = ancien comportement)
 
-def rot_z(angle):
-    """Rotation autour de la verticale."""
+# Angle de repos par articulation (rad) : la tâche articulaire tire doucement vers ces valeurs
+DEFAULT_FALLBACK = 0.0
+DEFAULT_JOINT_ANGLES = {
+    "left_hip_pitch": -2.0,
+    "right_hip_pitch": -2.0,
+    "left_knee": -1.0,
+    "right_knee": -1.0,
+    "left_shoulder_pitch": -2.0,
+    "right_shoulder_pitch": -2.0,
+    "left_elbow": 2.0,
+    "right_elbow": 2.0,
+    "left_ankle_pitch": 1.0,
+    "right_ankle_pitch": 1.0,
+}
+
+
+def rot_x(angle):
     c, s = math.cos(angle), math.sin(angle)
     return np.array([[c, -s, 0],
                      [s, c, 0],
                      [0, 0, 1]])
 
+
 class BasePlacoMove:
-    options = {"dx_cm": 0.0, "dy_cm": 0.0, "dz_cm": 7.5, "duration_s": 2.0}
-    option_docs = {
-        "dx_cm": "déplacement X (cm)",
-        "dy_cm": "déplacement Y (cm)",
-        "dz_cm": "déplacement Z (cm)",
-        "duration_s": "durée (s)",
-    }
+    options = {"duration_s": 2.0}
+    option_docs = {"duration_s": "durée du mouvement (s)"}
     variants = ("climber",)
 
-    FRAME = None  # défini par les classes enfants : le membre qui bouge
+    LIMB = None  # défini par les classes enfants
 
-    # Modèle et solveur PARTAGÉS par tous les mouvements : le tronc reste en mémoire
-    model = None
+    # PARTAGÉ par tous les mouvements
+    robot = None
     solver = None
-    tasks = None
-    foot_ori = None
-    joints_task = None
-    initialized = False  # la pose de départ a-t-elle déjà été lue ?
+    tasks = {}       # membre -> tâche de position
+    foot_ori = {}    # pied -> tâche d'orientation
+    last_time = 0.0  # temps du dernier pas (partagé : le temps continue d'un membre à l'autre)
 
     def __init__(self):
-        """Prépare Placo une seule fois pour tous les mouvements."""
-        self.done = False
-        cls = BasePlacoMove # Partage des mouvements entre les 4 membres
-        if cls.model is None:
-            cls.model = placo.RobotWrapper(str(microban_model.urdf(climb=True)))
-            cls.solver = placo.KinematicsSolver(cls.model)  # tronc LIBRE (pas de mask_fbase)
-
-            # Limites : genoux, et chevilles (le pied ne se casse pas)
-            cls.model.set_joint_limits("left_knee", 0.01, 2.3)
-            cls.model.set_joint_limits("right_knee", 0.01, 2.3)
-            cls.model.set_joint_limits("left_ankle_pitch", -0.7, 0.55)
-            cls.model.set_joint_limits("right_ankle_pitch", -0.7, 0.55)
-
-            # Tâches de position : chaque boule vise sa prise (poids fort, c'est la priorité)
-            cls.tasks = {f: cls.solver.add_position_task(f, np.zeros(3)) for f in FRAMES}
-            for f, task in cls.tasks.items():
-                task.configure(f"{f}_pos", "soft", 100.0)
-
-            # Tâches d'orientation des pieds : à plat, fortes pour le pied qui bouge
-            toe = math.radians(TOE_IN_DEG)
-            cls.foot_ori = {
-                "right_foot_ball": cls.solver.add_orientation_task("right_foot_ball", rot_z(toe)),
-                "left_foot_ball": cls.solver.add_orientation_task("left_foot_ball", rot_z(-toe)),
-            }
-            for f, task in cls.foot_ori.items():
-                task.configure(f"{f}_ori", "soft", 1e-3)
-
-            # Tâche d'orientation du tronc : reste à peu près droit, mais peut se pencher en arrière
-            body_orientation_task = cls.solver.add_orientation_task("body", np.eye(3))
-            body_orientation_task.configure("body_orientation", "soft", 1e-4)
-
-            # Tâche articulaire : tire doucement vers la posture de repos (REST_POSTURE, fixée au 1er start)
-            cls.joints_task = cls.solver.add_joints_task()
-            cls.joints_task.configure("joints", "soft", 1e-5)
-            cls.joints_task.set_joints({j: 0.0 for j in cls.model.joint_names()})
-
-            # Régularisation : évite les mouvements brusques
-            cls.solver.add_regularization_task(1e-3)
-            cls.solver.enable_joint_limits(True)
-            cls.model.update_kinematics()
-
-    def _sync(self, obs):
-        """Recopie les angles mesurés dans le modèle Placo (le tronc reste celui du modèle)."""
-        for i, name in enumerate(JOINTS):
-            self.model.set_joint(name, float(obs["q"][i]))
-        self.model.update_kinematics()
-
-    def start(self, obs):
-        self._sync(obs)
-
-        # Au premier mouvement, la pose de départ sert de référence :
-        # cibles des boules, et angles de départ pour les articulations hors REST_POSTURE
-        cls = BasePlacoMove
-        if not cls.initialized:
-            for f in FRAMES:
-                self.tasks[f].target_world = self.model.get_T_world_frame(f)[:3, 3].copy()
-            rest = {}
-            for j in self.model.joint_names():
-                kind = j.replace("left_", "").replace("right_", "")
-                rest[j] = REST_POSTURE.get(kind, self.model.get_joint(j))
-            self.joints_task.set_joints(rest)
-            cls.initialized = True
-
-        # Le pied qui bouge reste à plat, l'autre seulement un peu
-        for f, task in self.foot_ori.items():
-            task.configure(f"{f}_ori", "soft", 1.0 if f == self.FRAME else 1e-3)
-
-        # Le membre part de sa dernière cible (pas de dérive d'un mouvement à l'autre)
-        self.p0 = self.tasks[self.FRAME].target_world.copy()
-        self.t0 = obs["time"]
-        self.last_time = obs["time"]
+        self.options = dict(self.options)
         self.done = False
 
-    def _path(self, s):
-        """Décalage (m) par rapport à p0, s va de 0 à 1."""
-        o = self.options
-        dx, dy, dz = o["dx_cm"] / 100.0, o["dy_cm"] / 100.0, o["dz_cm"] / 100.0
-        limb = "foot" if self.FRAME in FEET else "hand"
-        H, P = OVER[limb], PRESS[limb]
+    @staticmethod
+    def sync(obs):
+        """Recopie les angles mesurés dans le modèle Placo."""
+        B = BasePlacoMove
+        for name in B.robot.joint_names():
+            B.robot.set_joint(name, obs["q"][JOINTS.index(name)])
+        B.robot.update_kinematics()
 
-        # Les 6 points du chemin, parcourus à vitesse régulière
-        pts = np.array([
-            [0.0,         0.0, 0.0],
-            [0.0,         0.0, LIFT],     # se lève
-            [dx - BACK,   dy,  LIFT],     # recule
-            [dx - BACK,   dy,  dz + H],   # monte au-dessus de la prise
-            [dx + P,      dy,  dz + H],   # avance en appuyant vers le mur
-            [dx,          dy,  dz],       # se pose sur la prise
-        ])
+    @staticmethod
+    def setup(obs):
+        """Crée le robot Placo et toutes les tâches (les boules visent leur position de départ)."""
+        B = BasePlacoMove
+        urdf = find_urdf()
+        print(f"[movePlaco] URDF : {urdf}")
+        B.robot = placo.RobotWrapper(urdf, placo.Flags.collision_as_visual)
+        B.solver = placo.KinematicsSolver(B.robot)
+        B.solver.mask_fbase(False)
+        B.sync(obs)
+        B.last_time = obs["time"]
 
-        spline = placo.CubicSpline3D()
-        for k, p in enumerate(pts):
-            spline.add_point(k / (len(pts) - 1), np.array(p), np.zeros(3))  # vitesse nulle à chaque point
+        # Une tâche de position par boule
+        B.tasks = {}
+        for limb, frame in LIMB_FRAMES.items():
+            B.tasks[limb] = B.solver.add_position_task(frame, START_POS[limb].copy())
+            B.tasks[limb].configure(f"{limb}_pos", "soft", 100.0)
 
-        return spline.pos(s)
+        # Pieds : à plat sur le mur, pointes légèrement vers l'intérieur
+        toe_in = TOE_IN_SIGN * math.radians(TOE_IN_DEG)
+        B.foot_ori = {
+            "right_foot": B.solver.add_orientation_task(LIMB_FRAMES["right_foot"], rot_x(-toe_in)),
+            "left_foot": B.solver.add_orientation_task(LIMB_FRAMES["left_foot"], rot_x(toe_in)),
+        }
+        for foot, task in B.foot_ori.items():
+            task.configure(f"{foot}_ori", "soft", FOOT_REST_WEIGHT)
 
-    def step(self, obs):
-        s = min((obs["time"] - self.t0) / max(self.options["duration_s"], 0.01), 1.0)
-        self.tasks[self.FRAME].target_world = self.p0 + self._path(s)
-        self.done = s >= 1.0
+        body_orientation_task = B.solver.add_orientation_task("body", np.eye(3))
+        body_orientation_task.configure("body_orientation", "soft", 1e-4)
 
-        # On repart des angles mesurés à chaque pas, puis un seul pas de solveur :
-        # si un membre s'affaisse, l'erreur est vue au pas suivant et corrigée
-        self._sync(obs)
-        dt = obs["time"] - self.last_time
-        self.last_time = obs["time"]
+        # Limites et régularisation
+        B.robot.set_joint_limits("left_knee", 0.01, 2.3)
+        B.robot.set_joint_limits("right_knee", 0.01, 2.3)
+        B.robot.set_joint_limits("left_ankle_pitch", -0.7, 0.55)
+        B.robot.set_joint_limits("right_ankle_pitch", -0.7, 0.55)
+        B.solver.enable_joint_limits(True)
+
+        joints = B.solver.add_joints_task()
+        joints.configure("joints", "soft", 1e-5)
+        joints.set_joints({n: DEFAULT_JOINT_ANGLES.get(n, DEFAULT_FALLBACK) for n in B.robot.joint_names()})
+        B.solver.add_regularization_task(1e-3)
+
+        unknown = set(DEFAULT_JOINT_ANGLES) - set(B.robot.joint_names())
+        if unknown:
+            print(f"WARNING: unknown joints in DEFAULT_JOINT_ANGLES: {unknown}")
+
+    def begin(self):
+        """Prépare le mouvement de ce membre : orientation des pieds et trajectoire."""
+        B = BasePlacoMove
+        print(f"------------\nMoving limb: {self.LIMB}")
+
+        # Le pied actif reste à plat, l'autre garde juste un peu son angle
+        for foot, task in B.foot_ori.items():
+            task.configure(f"{foot}_ori", "soft", 1.0 if foot == self.LIMB else FOOT_REST_WEIGHT)
+
+        # Trajectoire : se lève, recule, monte, revient au-dessus de la prise, se pose
+        T, z = self.options["duration_s"], Z_SPACING
+        p = B.tasks[self.LIMB].target_world.copy()  # part de la dernière cible (pas de dérive)
+        self.start_position = p.copy()
+        waypoints = [
+            [0.0, p],
+            [T * 0.2, p + np.array([0, 0, 0.04])],
+            [T * 0.4, p + np.array([-0.03, 0, z / 2])],
+            [T * 0.6, p + np.array([-0.03, 0, z * 1.6])],
+            [T * 0.8, p + np.array([0, 0, z]) + COMPENSATION[self.LIMB]],
+            [T, p + np.array([0, 0, z])],
+        ]
+        self.spline = placo.CubicSpline3D()
+        for t, pos in waypoints:
+            self.spline.add_point(t, pos, np.zeros(3))
+        self.movement_time = 0.0
+        self.done = False
+
+    def set_target(self, t):
+        """La boule de ce membre vise le point de sa trajectoire à l'instant t."""
+        BasePlacoMove.tasks[self.LIMB].target_world = self.spline.pos(t)
+
+    def retry(self):
+        """Rejoue toute la trajectoire depuis sa position de départ."""
+        BasePlacoMove.tasks[self.LIMB].target_world = self.start_position.copy()
+        self.begin()
+
+    @staticmethod
+    def time_step(obs):
+        """Recopie les angles mesurés et renvoie le dt depuis le dernier pas."""
+        B = BasePlacoMove
+        B.sync(obs)
+        now = obs["time"]
+        dt = now - B.last_time
+        B.last_time = now
         if dt <= 0.0:
             dt = 1e-3
-        self.solver.dt = dt
+        return dt
+
+    @staticmethod
+    def solve(dt):
+        """Résout la cinématique, intègre les vitesses articulaires et renvoie les consignes."""
+        B = BasePlacoMove
+        B.solver.dt = dt
         try:
-            self.solver.solve(True)
+            B.solver.solve(True)
         except Exception:
-            self.solver.solve(False)
-        for name in self.model.joint_names():
-            self.model.set_joint(name, self.model.get_joint(name) + self.model.get_joint_velocity(name) * dt)
-        self.model.update_kinematics()
+            B.solver.solve(False)
+        for name in B.robot.joint_names():
+            B.robot.set_joint(name, B.robot.get_joint(name) + B.robot.get_joint_velocity(name) * dt)
+        B.robot.update_kinematics()
+        return {name: B.robot.get_joint(name) for name in B.robot.joint_names()}
 
-        # On renvoie tous les joints : le tronc monte, les jambes se tendent
-        return {name: self.model.get_joint(name) for name in JOINTS}
+    # --- Lancer un seul membre (touche du membre) ---
 
-# --- Déclinaisons simples pour chaque membre ---
+    def start(self, obs):
+        B = BasePlacoMove
+        if B.robot is None:
+            B.setup(obs)
+        B.last_time = obs["time"]
+        self.begin()
+
+    def step(self, obs):
+        dt = self.time_step(obs)
+        self.movement_time += dt
+        if self.movement_time <= self.options["duration_s"]:
+            self.set_target(self.movement_time)
+        else:
+            self.done = True  # la boule reste sur sa dernière cible
+        return self.solve(dt)
+
+
+# --- Déclinaisons pour chaque membre ---
 
 class MoveRightArm(BasePlacoMove):
-    """Fait bouger la main droite en X, Y, Z."""
-    variants = ("climber",)
-    FRAME = "right_hand_ball"
+    LIMB = "right_hand"
+
 
 class MoveLeftArm(BasePlacoMove):
-    """Fait bouger la main gauche en X, Y, Z."""
-    variants = ("climber",)
-    FRAME = "left_hand_ball"
+    LIMB = "left_hand"
+
 
 class MoveRightLeg(BasePlacoMove):
-    """Fait bouger le pied droit en X, Y, Z."""
-    variants = ("climber",)
-    FRAME = "right_foot_ball"
+    LIMB = "right_foot"
+
 
 class MoveLeftLeg(BasePlacoMove):
-    """Fait bouger le pied gauche en X, Y, Z."""
-    variants = ("climber",)
-    FRAME = "left_foot_ball"
+    LIMB = "left_foot"
