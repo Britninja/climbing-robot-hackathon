@@ -21,6 +21,20 @@ LIMB_FRAMES = {                     # membre -> repère URDF qui touche le mur
     "right_foot": "right_foot_ball",
 }
 Z_SPACING = 0.075                   # distance entre deux barreaux (m)
+DEFAULT_LIMB_DURATION_S = 2.0
+TRAJECTORY_LIFT_M = 0.04            # premier dégagement du membre (m)
+TRAJECTORY_BACKSTEP_M = 0.03        # recul avant la montée (m)
+TRAJECTORY_HALF_STEP_FACTOR = 0.5
+TRAJECTORY_LIFT_TIME = 0.2
+TRAJECTORY_BACKSTEP_TIME = 0.4
+TRAJECTORY_RAISE_TIME = 0.6
+TRAJECTORY_LANDING_COMPENSATION_TIME = 0.8
+TRAJECTORY_RAISE_FACTOR = 1.6       # hauteur maximale en multiples de l'espacement
+INITIAL_LEFT_FOOT_RETREAT_M = 0.03  # premier décollage : recul du mur avant la montée
+INITIAL_LEFT_FOOT_CLEARANCE_M = 0.05  # marge au-dessus du niveau de la prise cible
+INITIAL_LEFT_FOOT_RETREAT_TIME = 0.2
+INITIAL_LEFT_FOOT_LIFT_TIME = 0.4
+INITIAL_LEFT_FOOT_ABOVE_TARGET_TIME = 0.65
 
 # Position de départ des 4 boules dans le repère Placo (x = vers le mur, y = gauche, z = haut)
 START_POS = {
@@ -41,6 +55,18 @@ COMPENSATION = {
 TOE_IN_DEG = 10.0          # de combien les pointes de pied tournent vers l'intérieur
 TOE_IN_SIGN = -1.0         # inverser si les pieds tournent du mauvais côté
 FOOT_REST_WEIGHT = 1e-3    # garde aussi l'angle du pied en appui (0.0 = ancien comportement)
+FOOT_ACTIVE_WEIGHT = 1.0
+FOOT_LEVEL_WEIGHT = 1.0
+FOOT_LEVEL_ORIENTATION = np.eye(3)  # repère des pieds aligné sur le monde : semelles horizontales
+
+# Poids des tâches Placo et limites articulaires (rad)
+POSITION_TASK_WEIGHT = 100.0
+BODY_ORIENTATION_WEIGHT = 1e-4
+JOINT_TASK_WEIGHT = 1e-5
+SOLVER_REGULARIZATION_WEIGHT = 1e-3
+KNEE_LIMITS_RAD = (0.01, 2.3)
+ANKLE_PITCH_LIMITS_RAD = (-0.7, 0.55)
+MIN_SOLVER_DT_S = 1e-3
 
 # Angle de repos par articulation (rad) : la tâche articulaire tire doucement vers ces valeurs
 DEFAULT_FALLBACK = 0.0
@@ -66,7 +92,7 @@ def rot_x(angle):
 
 
 class BasePlacoMove:
-    options = {"duration_s": 2.0}
+    options = {"duration_s": DEFAULT_LIMB_DURATION_S}
     option_docs = {"duration_s": "durée du mouvement (s)"}
     variants = ("climber",)
 
@@ -107,7 +133,7 @@ class BasePlacoMove:
         B.tasks = {}
         for limb, frame in LIMB_FRAMES.items():
             B.tasks[limb] = B.solver.add_position_task(frame, START_POS[limb].copy())
-            B.tasks[limb].configure(f"{limb}_pos", "soft", 100.0)
+            B.tasks[limb].configure(f"{limb}_pos", "soft", POSITION_TASK_WEIGHT)
 
         # Pieds : à plat sur le mur, pointes légèrement vers l'intérieur
         toe_in = TOE_IN_SIGN * math.radians(TOE_IN_DEG)
@@ -119,49 +145,82 @@ class BasePlacoMove:
             task.configure(f"{foot}_ori", "soft", FOOT_REST_WEIGHT)
 
         body_orientation_task = B.solver.add_orientation_task("body", np.eye(3))
-        body_orientation_task.configure("body_orientation", "soft", 1e-4)
+        body_orientation_task.configure("body_orientation", "soft", BODY_ORIENTATION_WEIGHT)
 
         # Limites et régularisation
-        B.robot.set_joint_limits("left_knee", 0.01, 2.3)
-        B.robot.set_joint_limits("right_knee", 0.01, 2.3)
-        B.robot.set_joint_limits("left_ankle_pitch", -0.7, 0.55)
-        B.robot.set_joint_limits("right_ankle_pitch", -0.7, 0.55)
+        B.robot.set_joint_limits("left_knee", *KNEE_LIMITS_RAD)
+        B.robot.set_joint_limits("right_knee", *KNEE_LIMITS_RAD)
+        B.robot.set_joint_limits("left_ankle_pitch", *ANKLE_PITCH_LIMITS_RAD)
+        B.robot.set_joint_limits("right_ankle_pitch", *ANKLE_PITCH_LIMITS_RAD)
         B.solver.enable_joint_limits(True)
 
         joints = B.solver.add_joints_task()
-        joints.configure("joints", "soft", 1e-5)
+        joints.configure("joints", "soft", JOINT_TASK_WEIGHT)
         joints.set_joints({n: DEFAULT_JOINT_ANGLES.get(n, DEFAULT_FALLBACK) for n in B.robot.joint_names()})
-        B.solver.add_regularization_task(1e-3)
+        B.solver.add_regularization_task(SOLVER_REGULARIZATION_WEIGHT)
 
         unknown = set(DEFAULT_JOINT_ANGLES) - set(B.robot.joint_names())
         if unknown:
             print(f"WARNING: unknown joints in DEFAULT_JOINT_ANGLES: {unknown}")
 
-    def begin(self):
+    def begin(self, start_position=None, initial_ground_takeoff=False):
         """Prépare le mouvement de ce membre : orientation des pieds et trajectoire."""
         B = BasePlacoMove
         print(f"------------\nMoving limb: {self.LIMB}")
 
         # Le pied actif reste à plat, l'autre garde juste un peu son angle
         for foot, task in B.foot_ori.items():
-            task.configure(f"{foot}_ori", "soft", 1.0 if foot == self.LIMB else FOOT_REST_WEIGHT)
+            task.configure(f"{foot}_ori", "soft", FOOT_ACTIVE_WEIGHT if foot == self.LIMB else FOOT_REST_WEIGHT)
 
         # Trajectoire : se lève, recule, monte, revient au-dessus de la prise, se pose
         T, z = self.options["duration_s"], Z_SPACING
-        p = B.tasks[self.LIMB].target_world.copy()  # part de la dernière cible (pas de dérive)
-        waypoints = [
-            [0.0, p],
-            [T * 0.2, p + np.array([0, 0, 0.04])],
-            [T * 0.4, p + np.array([-0.03, 0, z / 2])],
-            [T * 0.6, p + np.array([-0.03, 0, z * 1.6])],
-            [T * 0.8, p + np.array([0, 0, z]) + COMPENSATION[self.LIMB]],
-            [T, p + np.array([0, 0, z])],
-        ]
+        p = B.tasks[self.LIMB].target_world.copy()  # dernière cible nominale (pas de dérive)
+        if initial_ground_takeoff:
+            # Le gauche part réellement du sol, alors que sa cible nominale représente
+            # encore la prise de départ. Le droit reste sur sa cible déjà montée.
+            start = np.asarray(start_position, dtype=float).copy()
+            destination = p + np.array([0.0, 0.0, z])
+            peak_z = max(start[2], destination[2]) + INITIAL_LEFT_FOOT_CLEARANCE_M
+            retreat = np.array([-INITIAL_LEFT_FOOT_RETREAT_M, 0.0, 0.0])
+            above_target = destination.copy()
+            above_target[2] = peak_z
+            waypoints = [
+                [0.0, start],
+                [T * INITIAL_LEFT_FOOT_RETREAT_TIME, start + retreat],
+                [T * INITIAL_LEFT_FOOT_LIFT_TIME, start + retreat + np.array([0.0, 0.0, peak_z - start[2]])],
+                [T * INITIAL_LEFT_FOOT_ABOVE_TARGET_TIME, above_target],
+                [T * TRAJECTORY_LANDING_COMPENSATION_TIME, destination + COMPENSATION[self.LIMB]],
+                [T, destination],
+            ]
+        else:
+            waypoints = [
+                [0.0, p],
+                [T * TRAJECTORY_LIFT_TIME, p + np.array([0, 0, TRAJECTORY_LIFT_M])],
+                [T * TRAJECTORY_BACKSTEP_TIME, p + np.array([-TRAJECTORY_BACKSTEP_M, 0, z * TRAJECTORY_HALF_STEP_FACTOR])],
+                [T * TRAJECTORY_RAISE_TIME, p + np.array([-TRAJECTORY_BACKSTEP_M, 0, z * TRAJECTORY_RAISE_FACTOR])],
+                [T * TRAJECTORY_LANDING_COMPENSATION_TIME, p + np.array([0, 0, z]) + COMPENSATION[self.LIMB]],
+                [T, p + np.array([0, 0, z])],
+            ]
         self.spline = placo.CubicSpline3D()
         for t, pos in waypoints:
             self.spline.add_point(t, pos, np.zeros(3))
         self.movement_time = 0.0
         self.done = False
+
+    @staticmethod
+    def frame_position_world(limb):
+        """Renvoie la position FK mesurée du point de contact d'un membre."""
+        B = BasePlacoMove
+        transform = B.robot.get_T_world_frame(LIMB_FRAMES[limb])
+        return transform[:3, 3].copy()
+
+    @staticmethod
+    def prepare_feet_for_cycle():
+        """Redresse les deux pieds à l'horizontale avant un cycle d'escalade."""
+        B = BasePlacoMove
+        for task in B.foot_ori.values():
+            task.target = FOOT_LEVEL_ORIENTATION.copy()
+            task.configure("feet_level", "soft", FOOT_LEVEL_WEIGHT)
 
     def set_target(self, t):
         """La boule de ce membre vise le point de sa trajectoire à l'instant t."""
@@ -176,7 +235,7 @@ class BasePlacoMove:
         dt = now - B.last_time
         B.last_time = now
         if dt <= 0.0:
-            dt = 1e-3
+            dt = MIN_SOLVER_DT_S
         return dt
 
     @staticmethod
