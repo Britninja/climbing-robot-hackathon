@@ -14,6 +14,7 @@ recordings/
 # Artefacts d'entraînement
 wandb/
 *.pt
+!climbing_rl/models/**/*.pt
 *.onnx
 
 # Fichiers générés / parasites
