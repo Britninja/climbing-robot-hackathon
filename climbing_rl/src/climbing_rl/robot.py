@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from functools import lru_cache
 
@@ -46,33 +47,127 @@ LIGHT_BOXES = {
   "radius_left": tuple((tuple(-c for c in pos), half) for pos, half in _RIGHT_FOREARM_BOXES),
 }
 
+#: Boîtes du reste du corps, mesurées au chargement : chaque boîte est l'enveloppe (dans le repère du corps) des
+#: morceaux convexes de collision du modèle dont le nom de maillage correspond à l'expression régulière. Les deux
+#: côtés utilisent les mêmes maillages placés différemment : on mesure chaque corps, pas de symétrie à deviner.
+#: Un groupe (motif, zmin, zmax) ne garde que les sommets dans cette tranche (mm) et étend la boîte à toute la
+#: tranche : le tronc est découpé ainsi, sinon les coins de sa boîte (vides en vrai) heurtent cuisses et avant-bras.
+_TRUNK = r"chest|pelvis|tt_main"
+_MESH_BOX_GROUPS = {
+  # bassin (étroit en x) ; caisse ; haut (étroit en y) ; poignée. Les supports d'épaule sont dans la caisse.
+  "trunk": ((_TRUNK, -10, 15), (_TRUNK, 15, 100), (_TRUNK, 100, 120), r"tt_handle"),
+  "head": (r".",),
+  "shoulder": (r".",),  # chape de l'épaule
+  "humerus": (r".",),  # entre les deux servos (déjà en boîtes dans le modèle)
+  "hip": (r"_(01|04|05|08|09|11)$", r"_(00|02)$", r"_(03|06|07|10)$"),  # plaque ; les deux pattes
+  "hip_block": (r"lock|horn|cap|bts2",),  # équerre + palonnier (sans les entretoises, minuscules)
+  "femur": (r".",),  # cuisse
+  "tibia": (r".",),  # tibia (le servo du genou est déjà une boîte)
+  "ankle_block": (r"lock.*_(0[1-9]|1[01])$", r"lock.*_00$|horn|cap|bts2"),  # équerre ; flanc + palonnier
+}
+_BODY_GROUP = {
+  "trunk": "trunk", "head": "head",
+  "shoulder": "shoulder", "shoulder_2": "shoulder",
+  "humerus__configuration_right": "humerus", "humerus__configuration_left": "humerus",
+  "hip": "hip", "hip_2": "hip",
+  "hip_block__configuration_right": "hip_block", "hip_block__configuration_left": "hip_block",
+  "femur__configuration_right": "femur", "femur__configuration_left": "femur",
+  "tibia__configuration_right": "tibia", "tibia__configuration_left": "tibia",
+  "ankle_block__configuration_left": "ankle_block", "ankle_block__configuration_right": "ankle_block",
+}
+
+#: Bits de collision du mode "light". Le monde (mur, prises, sol) a contype = conaffinity = 1. Toutes les
+#: géométries de collision du robot ont contype 3, conaffinity 2 : bit 1 -> touchent le monde, bit 2 -> se touchent
+#: entre elles (comme les boules et les maillages du modèle complet). MuJoCo ignore déjà les paires parent / enfant.
+ROBOT_CONTYPE, ROBOT_CONAFFINITY = 3, 2
+#: Paires de corps voisins (à deux articulations l'un de l'autre) dont les boîtes se chevauchent dans la pose
+#: accrochée : le chevauchement vient de la simplification en boîtes, pas d'une vraie collision. On les ignore.
+SELF_EXCLUDES = (
+  ("hip", "femur__configuration_right"),  # patte de la hanche / cuisse, de part et d'autre du bloc de hanche
+  ("hip_2", "femur__configuration_left"),
+  ("tibia__configuration_right", "foot_climb"),  # tibia / pied, de part et d'autre du bloc de cheville
+  ("tibia__configuration_left", "foot_climb_2"),
+)
+
 
 # --------------------------------------------------------------------------------------------------------------
 # Modèle
 # --------------------------------------------------------------------------------------------------------------
+@lru_cache(maxsize=None)
+def mesh_boxes() -> dict[str, tuple[tuple[tuple[float, ...], tuple[float, ...]], ...]]:
+  """Les boîtes de _MESH_BOX_GROUPS mesurées sur les maillages de collision : {corps: ((centre, demi-tailles) mm)}."""
+  model = mujoco.MjSpec.from_file(str(microban_model.mjcf(climb=True))).compile()
+  out = {}
+  for body_name, group in _BODY_GROUP.items():
+    body = model.body(body_name).id
+    pieces = {}  # nom du maillage -> sommets dans le repère du corps (mm)
+    for g in range(model.ngeom):
+      if (model.geom_bodyid[g] != body or model.geom_type[g] != mujoco.mjtGeom.mjGEOM_MESH
+          or not (model.geom_contype[g] or model.geom_conaffinity[g])):
+        continue
+      mid = model.geom_dataid[g]
+      verts = model.mesh_vert[model.mesh_vertadr[mid]:model.mesh_vertadr[mid] + model.mesh_vertnum[mid]]
+      rot = np.zeros(9)
+      mujoco.mju_quat2Mat(rot, model.geom_quat[g])
+      pieces[model.mesh(mid).name] = (verts @ rot.reshape(3, 3).T + model.geom_pos[g]) * 1000
+    boxes = []
+    for pattern in _MESH_BOX_GROUPS[group]:
+      pattern, zmin, zmax = pattern if isinstance(pattern, tuple) else (pattern, -np.inf, np.inf)
+      pts = np.vstack([v for name, v in pieces.items() if re.search(pattern, name)])
+      lo_z, hi_z = max(zmin, pts[:, 2].min()), min(zmax, pts[:, 2].max())
+      pts = pts[(pts[:, 2] >= zmin) & (pts[:, 2] <= zmax)]
+      lo, hi = pts.min(0), pts.max(0)
+      lo[2], hi[2] = lo_z, hi_z
+      boxes.append((tuple(float(x) for x in (lo + hi) / 2), tuple(float(x) for x in (hi - lo) / 2)))
+    out[body_name] = tuple(boxes)
+  return out
+
+
+def self_contacts(model: mujoco.MjModel, data: mujoco.MjData) -> list[tuple[str, str, float]]:
+  """Les contacts robot / robot de `data` (après mj_forward ou mj_collision) : (géom 1, géom 2, distance en m)."""
+  # le tronc s'appelle "trunk" seul, "robot/trunk" dans la scène mjlab
+  trunk = next(b for b in range(model.nbody) if model.body(b).name in ("trunk", "robot/trunk"))
+  on_robot = lambda g: model.body_rootid[model.geom_bodyid[g]] == trunk
+  name = lambda g: model.geom(g).name or f"{model.body(model.geom_bodyid[g]).name}#{g}"
+  return [
+    (name(c.geom1), name(c.geom2), float(c.dist))
+    for c in data.contact[:data.ncon] if on_robot(c.geom1) and on_robot(c.geom2)
+  ]
+
+
 def climber_spec(collisions: str = "light") -> mujoco.MjSpec:
   """Le MJCF du robot grimpeur (`microban_model/mjcf/robot_climb.xml`).
 
   collisions :
-    "light" (par défaut, pour l'entraînement) : seules les 4 boules, les 7 boîtes des servos et les boîtes des pieds
-      et avant-bras (LIGHT_BOXES) touchent le mur et les prises. Les 269 maillages convexes du corps sont
-      désactivés : en milliers d'exemplaires sur GPU, ils coûtent très cher, et ce sont les boules qui grimpent.
+    "light" (par défaut, pour l'entraînement) : le robot est couvert de primitives (4 boules, 7 boîtes des servos,
+      boîtes des pieds et avant-bras LIGHT_BOXES, boîtes mesurées sur les maillages du reste du corps) qui touchent
+      le mur, les prises, le sol et les autres membres du robot. Les 269 maillages convexes du corps sont
+      désactivés : en milliers d'exemplaires sur GPU, ils coûtent très cher.
     "full" : toutes les collisions du modèle (comme le simulateur officiel), pour vérifier une politique.
   """
   spec = mujoco.MjSpec.from_file(str(microban_model.mjcf(climb=True)))
+  # Pose qpos0 (liaison libre) loin du mur et du sol. Elle n'est jamais simulée (mjlab pose le robot accroché à
+  # chaque reset), mais MJWarp dimensionne/vérifie njmax et nconmax sur elle : tronc à l'origine, articulations à
+  # zéro, le robot est dans le sol et le mur (~134 contacts, ~540 lignes) et il faudrait des tampons bien plus gros,
+  # ce qui ralentit la simulation d'environ 15 %.
+  spec.body("trunk").pos = [0.4, -1.0, 1.0]
   if collisions == "light":
     for g in spec.geoms:
       if g.type == mujoco.mjtGeom.mjGEOM_MESH and (g.contype or g.conaffinity):
         g.contype = 0
         g.conaffinity = 0
-    for body_name, boxes in LIGHT_BOXES.items():
+      elif g.contype or g.conaffinity:  # boules et boîtes des servos du modèle
+        g.contype, g.conaffinity = ROBOT_CONTYPE, ROBOT_CONAFFINITY
+    for body_name, boxes in {**mesh_boxes(), **LIGHT_BOXES}.items():
       body = spec.body(body_name)
       for k, (pos, half) in enumerate(boxes):
-        # contype 1 / conaffinity 0 : touche le monde (mur, prises, sol), pas le reste du robot
         body.add_geom(
           name=f"{body_name}_box{k}", type=mujoco.mjtGeom.mjGEOM_BOX, pos=[p / 1000 for p in pos],
-          size=[h / 1000 for h in half], contype=1, conaffinity=0, group=3, density=0.0, rgba=[1.0, 0.2, 0.6, 0.5],
+          size=[h / 1000 for h in half], contype=ROBOT_CONTYPE, conaffinity=ROBOT_CONAFFINITY, group=3,
+          density=0.0, rgba=[1.0, 0.2, 0.6, 0.5],
         )
+    for a, b in SELF_EXCLUDES:
+      spec.add_exclude(bodyname1=a, bodyname2=b)
   elif collisions != "full":
     raise ValueError("collisions : 'light' ou 'full'")
   return spec

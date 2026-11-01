@@ -144,6 +144,8 @@ def _base_cfg(play: bool, collisions: str = "light", max_row: int = 32, mesh_hol
     rewards=rewards,
     terminations=terminations,
     sim=SimulationCfg(
+      # Tampons par monde : en simulation on reste sous ~45 contacts / ~190 lignes de contrainte, même avec des
+      # actions aléatoires fortes. Les agrandir sans besoin coûte ~15 % de vitesse.
       njmax=400,
       nconmax=128,
       mujoco=MujocoCfg(
