@@ -23,6 +23,7 @@ climbing_rl = "climbing_rl.tasks"
 
 [project.scripts]
 check-scene = "climbing_rl.check_scene:main"
+eval-policy = "climbing_rl.eval_policy:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/climbing_rl"]

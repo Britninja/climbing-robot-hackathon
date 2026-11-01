@@ -2,7 +2,7 @@
 
 from mjlab.tasks.registry import register_mjlab_task
 
-from climbing_rl.tasks.climb_env_cfg import hang_env_cfg, left_foot_env_cfg, ppo_cfg
+from climbing_rl.tasks.climb_env_cfg import hang_env_cfg, left_foot_env_cfg, ppo_cfg, both_foot_env_cfg
 
 register_mjlab_task(
   task_id="Climb-Hang-Microban",
@@ -16,4 +16,11 @@ register_mjlab_task(
   env_cfg=left_foot_env_cfg(),
   play_env_cfg=left_foot_env_cfg(play=True),
   rl_cfg=ppo_cfg("climb_left_foot", max_iterations=5000),
+)
+
+register_mjlab_task(
+  task_id="Climb-BothFoot-Microban",
+  env_cfg=both_foot_env_cfg(),
+  play_env_cfg=both_foot_env_cfg(play=True),
+  rl_cfg=ppo_cfg("climb_both_foot", max_iterations=5000),
 )

@@ -1,4 +1,8 @@
-# climbing_rl — RL du Microban grimpeur avec mjlab
+# climbing_rl — RL du Microban grimpeur avec mjlab (Léonard Bettcher)
+
+Ce projet a été pour moi ma premièr expérience en Renforcement Learning.
+J’ai utilisé une IA (Claude) pour assembler l’environnement mjlab à partir de trois dépôts existants (modèle du robot, modèle des servos BAM, simulateur officiel) qui ne fonctionnaient pas ensemble tels quels, puis pour apprendre comment fonctionnent PPO et la structure d’une tâche à partir d’un exemple.
+J’ai mis en place l’environnement GPU sur mon ordinateur (rtx 5070) et testé la simulation, puis crée et entrainé mes propres taches avec les connaissances apprises pendant le hackaton.
 
 Tâches [mjlab](https://github.com/mujocolab/mjlab) (RL massivement parallèle sur GPU) pour le Microban
 grimpeur (mains en boule) sur le mur du hackathon Rock Climbing Robots.
