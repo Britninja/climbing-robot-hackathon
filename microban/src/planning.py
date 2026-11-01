@@ -24,7 +24,11 @@ LIMB_FRAMES = {
     "right_foot": "right_foot_ball",
 }
 
-DEFAULT_HOLDS_JSON = Path(__file__).with_name("holds_N1.json")
+DEFAULT_WALL = "N2"
+HOLD_JSON_BY_WALL = {
+    "N1": Path(__file__).with_name("holds_N1.json"),
+    "N2": Path(__file__).with_name("holds_N2.json"),
+}
 GRID_PITCH_M = 0.015
 GRID_X0_M = 0.0175
 GRID_Z0_M = 0.010
@@ -42,18 +46,45 @@ IK_TOLERANCE_M = 0.006
 CONTACT_TASK_WEIGHT = 300.0
 POSTURE_TASK_WEIGHT = 0.01
 
-# Standard N1 opening stance. A hold is identified by the left bolt's grid cell.
-N1_START_CELLS = {
-    "left_hand": (18, 22),
-    "right_hand": (29, 22),
-    "left_foot": (21, 2),
-    "right_foot": (26, 2),
+# Standard opening stances. A hold is identified by the left bolt's grid cell.
+START_CELLS_BY_WALL = {
+    "N1": {
+        "left_hand": (18, 22),
+        "right_hand": (29, 22),
+        "left_foot": (21, 2),
+        "right_foot": (26, 2),
+    },
+    "N2": {
+        "left_hand": (18, 23),
+        "right_hand": (29, 23),
+        "left_foot": (21, 2),
+        "right_foot": (26, 2),
+    },
 }
 
+# Backwards-compatible default path; use holds_json_for_wall() for a selected wall.
+DEFAULT_HOLDS_JSON = HOLD_JSON_BY_WALL[DEFAULT_WALL]
 
-def load_holds(holds_json: str | Path = DEFAULT_HOLDS_JSON) -> dict[str, dict[str, Any]]:
+
+def _normalize_wall(wall: str) -> str:
+    normalized = str(wall).strip().upper()
+    if normalized not in HOLD_JSON_BY_WALL:
+        raise ValueError(f"Unknown wall {wall!r}; choose N1 or N2")
+    return normalized
+
+
+def holds_json_for_wall(wall: str = DEFAULT_WALL) -> Path:
+    """Return the default holds file for a wall (N1 or N2)."""
+    return HOLD_JSON_BY_WALL[_normalize_wall(wall)]
+
+
+def load_holds(
+    holds_json: str | Path | None = None,
+    wall: str = DEFAULT_WALL,
+) -> dict[str, dict[str, Any]]:
     """Load holds using only their grid columns and rows; ignore measured mm fields."""
-    path = Path(holds_json)
+    wall = _normalize_wall(wall)
+    path = holds_json_for_wall(wall) if holds_json is None else Path(holds_json)
     data = json.loads(path.read_text())
     if not isinstance(data, dict) or not isinstance(data.get("holds"), list):
         raise ValueError(f"{path} must contain a JSON object with a 'holds' list")
@@ -86,23 +117,27 @@ def hold_position(col: int, row: int) -> np.ndarray:
     return np.array([x, y, z], dtype=float)
 
 
-def default_start_state(holds: dict[str, dict[str, Any]]) -> dict[str, str]:
+def default_start_state(
+    holds: dict[str, dict[str, Any]], wall: str = DEFAULT_WALL
+) -> dict[str, str]:
+    current_start_pos = START_CELLS_BY_WALL[_normalize_wall(wall)]
     by_cell = {(hold["col"], hold["row"]): hold_id for hold_id, hold in holds.items()}
-    missing = [cell for cell in N1_START_CELLS.values() if cell not in by_cell]
+    missing = [cell for cell in current_start_pos.values() if cell not in by_cell]
     if missing:
         raise ValueError(
-            "Cannot infer the standard N1 start stance; missing hold cells "
+            f"Cannot infer the standard {wall} start stance; missing hold cells "
             f"{missing}. Pass start_state for a different route."
         )
-    return {limb: by_cell[cell] for limb, cell in N1_START_CELLS.items()}
+    return {limb: by_cell[cell] for limb, cell in current_start_pos.items()}
 
 
 def climbing_aStar(
-    holds_json: str | Path = DEFAULT_HOLDS_JSON,
+    holds_json: str | Path | None = None,
     start_state: dict[str, str] | None = None,
     goal_row: int | None = None,
+    wall: str = DEFAULT_WALL,
 ) -> list[dict[str, Any]] | None:
-    """Plan ``left_foot, right_foot, left_hand, right_hand`` moves to the top.
+    """Plan a route on N1 or N2 using that wall's holds and default start stance.
 
     Each search edge solves inverse kinematics for the entire robot: the three
     stationary ball frames remain on their current sockets while the scheduled
@@ -110,8 +145,9 @@ def climbing_aStar(
     highest hold row by default). Returned entries contain ``limb``, ``hold_id``,
     and the destination ``hold``'s ``col`` and ``row``.
     """
-    holds = load_holds(holds_json)
-    initial = _normalize_start_state(start_state, holds)
+    wall = _normalize_wall(wall)
+    holds = load_holds(holds_json, wall=wall)
+    initial = _normalize_start_state(start_state, holds, wall)
     start_positions = tuple(initial[limb] for limb in LIMBS)
     highest_row = max(hold["row"] for hold in holds.values())
     target_row = highest_row if goal_row is None else int(goal_row)
@@ -273,8 +309,8 @@ def _restore_configuration(robot, config):
     robot.update_kinematics()
 
 
-def _normalize_start_state(start_state, holds):
-    raw = default_start_state(holds) if start_state is None else start_state
+def _normalize_start_state(start_state, holds, wall=DEFAULT_WALL):
+    raw = default_start_state(holds, wall=wall) if start_state is None else start_state
     if set(raw) != set(LIMBS):
         raise ValueError(f"start_state must specify exactly these limbs: {', '.join(LIMBS)}")
 
@@ -330,7 +366,13 @@ def _reconstruct_moves(came_from, current):
 
 
 if __name__ == "__main__":
-    plan = climbing_aStar()
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Plan a climbing route on N1 or N2.")
+    parser.add_argument("wall", nargs="?", choices=tuple(HOLD_JSON_BY_WALL), default=DEFAULT_WALL)
+    args = parser.parse_args()
+
+    plan = climbing_aStar(wall=args.wall)
     if plan is None:
         print("No feasible route found")
     else:
