@@ -1,4 +1,0 @@
-[console_scripts]
-climbing-sim-cameras = climbing_sim.tools.camera_editor:main
-climbing-sim-wall = climbing_sim.tools.wall_tool:main
-climbing-sim-wall-editor = climbing_sim.tools.wall_editor:main

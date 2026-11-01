@@ -44,7 +44,7 @@ DECIMATION = 5  # 5 x 4 ms = une décision de la politique toutes les 20 ms, com
 LEFT_FOOT = LIMBS.index("left_foot")
 RIGHT_FOOT = LIMBS.index("right_foot")
 OTHERS_THAN_LEFT_FOOT = tuple(i for i in range(4) if i != LEFT_FOOT)
-OTHERS_THAN_BOTH_FOOT = tuple(i for i in range(4) if i != LEFT_FOOT and i != RIGHT_FOOT)
+OTHERS_THAN_BOTH_FEET = tuple(i for i in range(4) if i != LEFT_FOOT and i != RIGHT_FOOT)
 
 # Methode servant de base au taches (configuration de la scene, des actions, des observations pour le critic et l'actor, des events, des terminaisons et des rewards)
 def _base_cfg(play: bool, collisions: str = "light", max_row: int = 32, mesh_holds: tuple[Hold, ...] = (),) -> ManagerBasedRlEnvCfg:
@@ -239,7 +239,7 @@ def left_foot_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
 
 # Tache plus complexe, avec pour but de lever le pied gauche de la prise initiale vers la prise en haut a gauche, en gardant les 3 autre membre attaché 
 # (exemple donné par Claude)
-def both_foot_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
+def both_feet_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
   wall = Wall.load(WALL)
   start = wall.start_sockets() # Tableau des position des prises de base du robot sur le mur
 
@@ -271,7 +271,7 @@ def both_foot_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
   # Creation des reward exclusive à cette tache
   # Reward de maintient (contrainte douce), note de 0 à 1 en fonction de la distance d'une boule (autre que le pied gauche) avec sa prise de base (moyenne des 3)
   cfg.rewards["others_hooked"] = RewardTermCfg(
-    func=mdp.balls_near_sockets, weight=1.0, params={"sockets": goal, "std": 0.01, "limbs": OTHERS_THAN_BOTH_FOOT},
+    func=mdp.balls_near_sockets, weight=1.0, params={"sockets": goal, "std": 0.01, "limbs": OTHERS_THAN_BOTH_FEET},
   )
   # Reward progressive de guidage, note de 0 à 2 en fonction de la distance entre le pied gauche et sa prise cible
   cfg.rewards["left_foot_reach"] = RewardTermCfg(
@@ -290,7 +290,7 @@ def both_foot_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
 
   # Echec exclusif a cette tache (contrainte dure), si un des autres membre se détache de leurs prise (s’éloigne de plus de 3 cm de sa prise)
   cfg.terminations["limb_lost"] = TerminationTermCfg(
-    func=mdp.limbs_lost, params={"sockets": goal, "limbs": OTHERS_THAN_BOTH_FOOT, "max_dist": 0.03},
+    func=mdp.limbs_lost, params={"sockets": goal, "limbs": OTHERS_THAN_BOTH_FEET, "max_dist": 0.03},
   )
   cfg.episode_length_s = 8.0
   if play:

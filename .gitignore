@@ -10,3 +10,13 @@ placo_test.py
 move_options.json
 robot_variant.txt
 recordings/
+
+# Artefacts d'entraînement
+wandb/
+*.pt
+*.onnx
+
+# Fichiers générés / parasites
+*.egg-info/
+*:Zone.Identifier
+*.zip
