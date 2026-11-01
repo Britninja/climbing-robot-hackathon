@@ -11,6 +11,8 @@ tâches avec les connaissances apprises pendant le hackathon.
 Tâches [mjlab](https://github.com/mujocolab/mjlab) (RL massivement parallèle sur GPU) pour le Microban grimpeur
 (mains en boule) sur le mur du hackathon Rock Climbing Robots.*
 
+https://github.com/user-attachments/assets/de18ed70-e726-46a8-8a15-fd353b5d9e58
+
 ## Dépôts utilisés
 
 | Dépôt | Ce qu'on en prend |
