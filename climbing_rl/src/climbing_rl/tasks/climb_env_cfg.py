@@ -37,10 +37,12 @@ from climbing_rl.wall import LIMBS, Hold, Wall
 # Bibliotheque de fonctions utilitaires, utilisés pour les rewards et les observations
 from climbing_rl.tasks import mdp
 
-# Constantes 
+# Constantes pour la simulation
 WALL = "N1"
 TIMESTEP = 0.004  # La physique est mise a jour tout les 4ms
 DECIMATION = 5  # 5 x 4 ms = une décision de la politique toutes les 20 ms, comme le vrai robot
+
+# Constantes permettant d'accéder facilement aux membres du robot dans les taches
 LEFT_FOOT = LIMBS.index("left_foot")
 RIGHT_FOOT = LIMBS.index("right_foot")
 OTHERS_THAN_LEFT_FOOT = tuple(i for i in range(4) if i != LEFT_FOOT)
@@ -57,14 +59,14 @@ def _base_cfg(play: bool, collisions: str = "light", max_row: int = 32, mesh_hol
   # Configuration de la scène qui sera simulé parallelement
   scene = SceneCfg(
     terrain=None,  # Pas de terrain mjlab, tout les robot seront au même endroit (mais dans leur scene individuel)
-    num_envs=1, # Nombre de scène simulé en meme temps, sera écrasé par l'option de lancement --env.scene.num-envs 8192
+    num_envs=1, # Nombre de scène simulé en meme temps, sera écrasé par l'option de lancement --env.scene.num-envs 6144
     entities={"robot": climber_cfg(WALL, collisions=collisions, timestep=TIMESTEP)}, # La scène contiendra une entité (le robot), donné par climber_cfg(...) dans robot.py
     spec_fn=wall_spec_fn(
       WALL, max_row=max_row, hold_meshes=collisions == "full" or [(h.col, h.row) for h in mesh_holds],
     ), # On ajoute le mur, les prises (avec maillage pour celle précisé dans mesh_holds) et le sol à la scène (donné par la fonction wall_spec_fn(...) de scene.py) 
   )
 
-  # Creation des actions possible sur le robot, les 18 servomoteurs parametrables (sans la tete,  inutile)
+  # Creation des actions possible sur le robot, les 18 servomoteurs parametrables (sans la tete, inutile de la controller)
   # cible = pose accrochée + 0,5 x action (rad) 
   # l'ordre à zero corresponds à la pose de départ
   actions = {
@@ -125,7 +127,7 @@ def _base_cfg(play: bool, collisions: str = "light", max_row: int = 32, mesh_hol
   start_z = hang_pose(WALL).trunk_pos[2]
   terminations = {
     "time_out": TerminationTermCfg(func=time_out, time_out=True), # Le chrono est terminé ("time_out=True" car pour dire que la simu n'a pas échoué, juste time out)
-    "fell": TerminationTermCfg(func=mdp.trunk_dropped, params={"start_z": start_z, "max_drop": 0.05}), # Le robot est tombé
+    "fell": TerminationTermCfg(func=mdp.trunk_dropped, params={"start_z": start_z, "max_drop": 0.05}), # Le robot est tombé (tronc descendu de plus de 5cm)
     "nan": TerminationTermCfg(func=nan_detection), # Valeur de physique invalide (sécurité)
   }
 
@@ -237,28 +239,28 @@ def left_foot_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
   return cfg
 
 
-# Tache plus complexe, avec pour but de lever le pied gauche de la prise initiale vers la prise en haut a gauche, en gardant les 3 autre membre attaché 
-# (exemple donné par Claude)
+# Tache avec but de lever les deux pieds vers leurs prises supérieurs, en gardant les deux bras attachés
+# (Travail personel)
 def both_feet_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
   wall = Wall.load(WALL)
   start = wall.start_sockets() # Tableau des position des prises de base du robot sur le mur
 
   # On recupere des variables de la class Hold, représentant une prise sur le mur
   left_foot = wall.start["left_foot"] # Prise de base du pied gauche
-  right_foot = wall.start["right_foot"]
+  right_foot = wall.start["right_foot"] # Prise de base du pied droit
   left_target_hold = Hold(left_foot.col-3, left_foot.row + 5) # Prise visée pour le pied gauche 
-  right_target_hold = Hold(right_foot.col, right_foot.row + 5) # Prise visée pour le pied gauche 
-  # On verifie que la prise visé existe bien
+  right_target_hold = Hold(right_foot.col, right_foot.row + 5) # Prise visée pour le pied droit 
+
+  # On verifie que les prises visées existe bien
   if left_target_hold not in wall.holds:
     raise ValueError(f"pas de prise {left_target_hold} sur le mur {WALL}")
-  # On verifie que la prise visé existe bien
   if right_target_hold not in wall.holds:
     raise ValueError(f"pas de prise {right_target_hold} sur le mur {WALL}")
   
-  # Maillages de collision sur les prises des rangées 2 et 7 (là où passe le pied). Sans ca, la tige et le pied traversent le corps des prises (coute ~19 % de vitesse)
+  # Maillages de collision sur les prises des rangées 2 et 7 (là où passe le pied). Sans ca, la tige et le pied traversent le corps des prises (coute 20% de vitesse)
   cfg = _base_cfg(play, mesh_holds=tuple(h for h in wall.holds if h.row in (left_foot.row, left_target_hold.row)))
 
-  # On creer un tableau avec les positions des prises cible pour le robot (3 prises de départ et la nouvelle prise du pied gauche)
+  # On creer un tableau avec les positions des prises cible pour le robot (prises de départ pour les bras et les nouvelle prise des pieds)
   goal = start.copy()
   goal[LEFT_FOOT] = left_target_hold.socket
   goal[RIGHT_FOOT] = right_target_hold.socket
@@ -269,18 +271,18 @@ def both_feet_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
   cfg.observations["critic"].terms["hooked"].params["sockets"] = goal
 
   # Creation des reward exclusive à cette tache
-  # Reward de maintient (contrainte douce), note de 0 à 1 en fonction de la distance d'une boule (autre que le pied gauche) avec sa prise de base (moyenne des 3)
+  # Reward de maintient des boules à leurs prises (contrainte douce), note de 0 à 1 en fonction de la distance d'une boule d'une main avec sa prise de base (moyenne des 2 bras)
   cfg.rewards["others_hooked"] = RewardTermCfg(
     func=mdp.balls_near_sockets, weight=1.0, params={"sockets": goal, "std": 0.01, "limbs": OTHERS_THAN_BOTH_FEET},
   )
-  # Reward progressive de guidage, note de 0 à 2 en fonction de la distance entre le pied gauche et sa prise cible
+  # Reward progressive de guidage, note de 0 à 2 en fonction de la distance entre un pied et sa prise cible
   cfg.rewards["left_foot_reach"] = RewardTermCfg(
     func=mdp.limb_reach, weight=2.0, params={"sockets": goal, "limb": LEFT_FOOT, "std": 0.04},
   )
   cfg.rewards["right_foot_reach"] = RewardTermCfg(
     func=mdp.limb_reach, weight=2.0, params={"sockets": goal, "limb": RIGHT_FOOT, "std": 0.04},
   )
-  # Reward tout ou rien, 5 si la boule du pied gauche est attaché dans la prise cible (moins de 6 mm du centre de la prise)
+  # Reward tout ou rien, 5 si la boule du pied est attaché dans sa prise cible (moins de 6 mm du centre de la prise)
   cfg.rewards["left_foot_hooked"] = RewardTermCfg(
     func=mdp.limb_hooked, weight=5.0, params={"sockets": goal, "limb": LEFT_FOOT},
   )
@@ -288,7 +290,7 @@ def both_feet_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     func=mdp.limb_hooked, weight=5.0, params={"sockets": goal, "limb": RIGHT_FOOT},
   )
 
-  # Echec exclusif a cette tache (contrainte dure), si un des autres membre se détache de leurs prise (s’éloigne de plus de 3 cm de sa prise)
+  # Echec exclusif a cette tache (contrainte dure), si un des bras se détache de leurs prise (s’éloigne de plus de 3 cm de sa prise)
   cfg.terminations["limb_lost"] = TerminationTermCfg(
     func=mdp.limbs_lost, params={"sockets": goal, "limbs": OTHERS_THAN_BOTH_FEET, "max_dist": 0.03},
   )
