@@ -12,12 +12,13 @@ PROJECT_ROOT = Path(__file__).resolve().parents[3]
 MAP_PATH = PROJECT_ROOT / "simulator/climbing_sim/walls" / "N1.json"
 
 
-hole_dist = 0.015  # cm / 100
-ball_rad = 0.0125  # cm /
+hole_dist = 0.015  # 15mm as cm / 100
+ball_rad = 0.0125  # cm / 100
 ball_center_wall_dist = 0.026  # cm
-wall_start_leg_dist = 6 * hole_dist  # m
-wall_start_arm_dist = 11 * hole_dist  # m
-wall_start_arm_leg_dist = 3 * hole_dist  # m (left-left or right-right)
+first_hole_floor_dist = hole_dist / 2  # ?
+wall_start_leg_dist = 5 * hole_dist
+wall_start_arm_dist = 11 * hole_dist
+wall_start_arm_leg_dist = 3 * hole_dist  # (left-left or right-right)
 with open(MAP_PATH, "r") as f:
     _HOLDS_MAP = json.load(f)
 
@@ -33,7 +34,7 @@ MJCF_PATH = str(microban_model.mjcf(climb=True))
 
 class ClimbMove:
     start_pose = "current"
-    options = {"y_spacing": 0.15, "z_spacing": 0.06}
+    options = {"y_spacing": wall_start_leg_dist, "z_spacing": wall_start_leg_dist}
     option_docs = {
         "y_spacing": "Distance left foot (to right foot)",
         "z_spacing": "hopefully hold_distance (rows)",
@@ -41,13 +42,6 @@ class ClimbMove:
     variants = ("climber",)
 
     def __init__(self) -> None:
-        # "Holds" position (just for visualization)
-        self._vis_holds = [
-            [0, y, z]
-            for y in [0, self.options["y_spacing"]]
-            for z in np.arange(0, 1, self.options["z_spacing"])
-        ]
-
         self._robot = placo.RobotWrapper(
             MJCF_PATH, placo.Flags.mjcf + placo.Flags.ignore_collisions
         )
@@ -114,11 +108,27 @@ class ClimbMove:
         joints_task = self._solver.add_joints_task()
         joints_task.configure("joints", "soft", 1e-6)
 
+        # TODO: do i need this?
         joints_task.set_joints({joint: 0 for joint in JOINTS})
 
-        # TODO: is this for not moving the body much in general?
+        # I think this is this for not moving the body much in general?
         self._solver.add_regularization_task(1e-3)
         self._solver.enable_joint_limits(True)
+
+        # "Holds" position (just for visualization)
+        # x = into wall (red), y = green = left/right, z (blue) = height
+        print("left_foot_start")
+        print(left_foot_start)
+        self._vis_holds = np.array(
+            [
+                [left_foot_start[0], left_foot_start[1] + y, left_foot_start[2] + z]
+                for y in [0, self.options["y_spacing"]]
+                for z in np.linspace(start=0, stop=5 * self.options["z_spacing"], num=5)
+            ]
+        )
+        print("self._vis_holds")
+        print(self._vis_holds)
+        points_viz("holds", self._vis_holds)
 
         # leg_dist_task = self._solver.add_distance_task(
         #     "left_foot_ball",
@@ -127,12 +137,13 @@ class ClimbMove:
         # )
         # leg_dist_task.configure("leg distance", "soft", 1e-3)
 
-        # TODO: is this for calculating the neutral position ???
-
     def start(self, obs) -> None:
+        print("\nSTART: CLIMB MOVE\n")
+
         for _ in range(50):
             self._solver.solve(True)
             self._robot.update_kinematics()
+            
         self._task_rotation_index = 0
         self._limb_move_status = "ready"
         self._viz = robot_viz(self._robot)
@@ -145,20 +156,19 @@ class ClimbMove:
         x = [
             0,  # 0
             0,  # 1
-            -3 * ball_center_wall_dist - 0.005,  # 2
-            -3 * ball_center_wall_dist - 0.005,  # 3
+            (-2 * ball_center_wall_dist) - 0.005,  # 2
+            (-2 * ball_center_wall_dist) - 0.005,  # 3
             0.005,  # 4
             0,  # 5
             # 6
         ]  # x: into wall (- is away from wall)
 
-        y = [0, 0, 0, 0, 0, 0]  # y: gauche
         z = [
             0,
-            1 * hole_dist,
-            1 * hole_dist,
             3 * hole_dist,
-            4 * hole_dist,
+            3 * hole_dist,
+            3 * hole_dist,
+            3 * hole_dist,
             3 * hole_dist,
         ]  # height
         n_steps = len(x)
@@ -166,10 +176,8 @@ class ClimbMove:
         for i in range(n_steps):
             way_pts[i] = [
                 (i / (n_steps - 1)) * part_duration,
-                prev_target + [x[i], y[i], z[i]],
+                prev_target + [x[i], 0, z[i]],  # y = [0, 0, 0, 0, 0, 0]  # y: gauche
             ]
-        print("way_pts")
-        print(way_pts)
         return way_pts
 
     def step(self, obs):
@@ -189,34 +197,37 @@ class ClimbMove:
                 self._trajectory = placo.CubicSpline3D()
                 for t, pos in self._waypoints:
                     self._trajectory.add_point(t, pos, np.zeros(3))
+                # print(self._trajectory.duration())
                 self._limb_move_status = "running"
                 self._limb_move_t0 = obs["time"]
+                print(f"last waypoint: {self._waypoints[-1][-1]}")
+                print(f"first_target: {task.target_world}")
                 return {}
             case "running":
                 print(f"running")
-                if obs["time"] - self._limb_move_t0 < self.part_duration:
-                    time_for_pos = obs["time"] - self._limb_move_t0
-                    print(time_for_pos)
+                time_for_pos = obs["time"] - self._limb_move_t0
+                print(f"time_for_pos: {time_for_pos}")
+                if time_for_pos < self.part_duration:
+                    # s = min(time_for_pos / max(self.part_duration, 0.01), 1.0)
+                    # if s > self.part_duration:
+                    #                    print(s)
                     pos_delta = self._trajectory.pos(time_for_pos)
-                    limb_start = self._limb_starts[self._task_rotation_index]
-                    print(limb_start)
+                    limb_start = self._limb_starts[
+                        self._task_rotation_index
+                    ]  # right_foot: [-0.026, 0.39, 0.03]
                     print(pos_delta)
-                    task.target_world = limb_start + pos_delta
+                    task.target_world = pos_delta
 
                     self._solver.solve(True)
                     self._robot.update_kinematics()
 
-                    points_viz("holds", self._vis_holds)
-
                     self._viz.display(self._robot.state.q)
+                else:
+                    self._limb_move_status = "finished"
 
                 print(f"target_world: {task.target_world}")
-                print(f"last waypoint: {self._waypoints[-1][-1]}")
                 # print(f"ball position: {self._robot.get_joint("left_foot_ball")}")
-                if np.allclose(
-                    task.target_world, self._waypoints[-1][-1], atol=0.001, rtol=0
-                ):
-                    self._limb_move_status = "finished"
+
                 return {name: self._robot.get_joint(name) for name in JOINTS}
             case "finished":
                 print("finished")
