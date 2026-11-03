@@ -143,7 +143,7 @@ class ClimbMove:
         for _ in range(50):
             self._solver.solve(True)
             self._robot.update_kinematics()
-            
+
         self._task_rotation_index = 0
         self._limb_move_status = "ready"
         self._viz = robot_viz(self._robot)
@@ -167,16 +167,16 @@ class ClimbMove:
             0,
             3 * hole_dist,
             3 * hole_dist,
-            3 * hole_dist,
-            3 * hole_dist,
-            3 * hole_dist,
+            6 * hole_dist,
+            6 * hole_dist,
+            5 * hole_dist,
         ]  # height
         n_steps = len(x)
         way_pts = [[]] * n_steps
         for i in range(n_steps):
             way_pts[i] = [
                 (i / (n_steps - 1)) * part_duration,
-                prev_target + [x[i], 0, z[i]],  # y = [0, 0, 0, 0, 0, 0]  # y: gauche
+                prev_target + [x[i], 0, z[i]],  # y: gauche
             ]
         return way_pts
 
@@ -190,6 +190,8 @@ class ClimbMove:
     def _move_limb(self, obs, task):
         match self._limb_move_status:
             case "ready":
+                calc_start = time.perf_counter()
+
                 print(f"ready: {self._ball_frames[self._task_rotation_index]}")
                 self._waypoints = self.calc_target_update_waypoints(
                     task, self.part_duration
@@ -199,26 +201,30 @@ class ClimbMove:
                     self._trajectory.add_point(t, pos, np.zeros(3))
                 # print(self._trajectory.duration())
                 self._limb_move_status = "running"
-                self._limb_move_t0 = obs["time"]
                 print(f"last waypoint: {self._waypoints[-1][-1]}")
                 print(f"first_target: {task.target_world}")
+                print('obs["time"]')
+                print(obs["time"])
+                calc_duration = time.perf_counter() - calc_start
+                self._limb_move_t0 = obs["time"] + calc_duration
                 return {}
             case "running":
-                print(f"running")
-                time_for_pos = obs["time"] - self._limb_move_t0
+                print(f"\nrunning")
+                time_for_pos = obs["time"] - self._limb_move_t0 - 1.0
                 print(f"time_for_pos: {time_for_pos}")
                 if time_for_pos < self.part_duration:
                     # s = min(time_for_pos / max(self.part_duration, 0.01), 1.0)
                     # if s > self.part_duration:
                     #                    print(s)
                     pos_delta = self._trajectory.pos(time_for_pos)
-                    limb_start = self._limb_starts[
-                        self._task_rotation_index
-                    ]  # right_foot: [-0.026, 0.39, 0.03]
-                    print(pos_delta)
+                    # right_foot start : [-0.026, 0.39, 0.03]
                     task.target_world = pos_delta
 
                     self._solver.solve(True)
+
+                    for name in self._robot.joint_names():
+                        self._robot.set_joint(name, self._robot.get_joint(name) + self._robot.get_joint_velocity(name) * time_for_pos)
+
                     self._robot.update_kinematics()
 
                     self._viz.display(self._robot.state.q)
